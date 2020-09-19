@@ -24,7 +24,9 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import kotlinx.coroutines.yield
+import org.intellij.lang.annotations.Flow
 import java.util.Collections
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.reflect.KProperty1
 
@@ -165,14 +167,17 @@ abstract class MavericksViewModel<S : MavericksState>(
      * @param retainValue A state property that, when set, will be called to retrieve an optional existing data value that will be retained across
      *                    subsequent Loading and Fail states. This is useful if you want to display the previously successful data when
      *                    refreshing.
+     * @param errorCheck A function that returns a [Throwable] used to create a [Fail] if the value returned by the [Deferred] is considered a
+     *                   failed result. If the value is considered a successful return value, then this should return null.
      * @param reducer A reducer that is applied to the current state and should return the new state. Because the state is the receiver
      *                and it likely a data class, an implementation may look like: `{ copy(response = it) }`.
      */
     fun <T : Any?> Deferred<T>.execute(
         dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
         retainValue: KProperty1<S, Async<T>>? = null,
+        errorCheck: (T) -> Throwable? = { null },
         reducer: S.(Async<T>) -> S
-    ) = suspend { await() }.execute(dispatcher, retainValue, reducer)
+    ) = suspend { await() }.execute(dispatcher, retainValue, errorCheck, reducer)
 
     /**
      * Run a coroutine and wrap its progression with [Async] property reduced to the global state.
@@ -181,12 +186,15 @@ abstract class MavericksViewModel<S : MavericksState>(
      * @param retainValue A state property that, when set, will be called to retrieve an optional existing data value that will be retained across
      *                    subsequent Loading and Fail states. This is useful if you want to display the previously successful data when
      *                    refreshing.
+     * @param errorCheck A function that returns a [Throwable] used to create a [Fail] if the value returned by the suspend function is considered a
+     *                   failed result. If the value is considered a successful return value, then this should return null.
      * @param reducer A reducer that is applied to the current state and should return the new state. Because the state is the receiver
      *                and it likely a data class, an implementation may look like: `{ copy(response = it) }`.
      */
     fun <T : Any?> (suspend () -> T).execute(
         dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
         retainValue: KProperty1<S, Async<T>>? = null,
+        errorCheck: (T) -> Throwable? = { null },
         reducer: S.(Async<T>) -> S
     ): Job {
         val blockExecutions = config.onExecute(this@MavericksViewModel)
@@ -203,7 +211,8 @@ abstract class MavericksViewModel<S : MavericksState>(
         return viewModelScope.launch(dispatcher) {
             try {
                 val result = invoke()
-                setState { reducer(Success(result)) }
+                val asyncResult = errorCheck(result)?.let { Fail(it, result) } ?: Success(result)
+                setState { reducer(asyncResult) }
             } catch (e: CancellationException) {
                 @Suppress("RethrowCaughtException")
                 throw e
